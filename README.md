@@ -1,93 +1,93 @@
 # SOCKS5-WS-Proxy
 
-SOCKS5-прокси поверх WebSocket через HTTPS. Маскирует TCP-трафик под обычный HTTPS WebSocket-трафик.
+A SOCKS5 proxy tunneled over WebSocket through HTTPS. Masks TCP traffic as regular HTTPS WebSocket traffic.
 
 ```
-[Браузер] → SOCKS5 → [socks5-client :9999] → WSS → [Nginx :443] → [ws-proxy-server :8080] → Интернет
+[Browser] → SOCKS5 → [socks5-client :9999] → WSS → [Nginx :443] → [ws-proxy-server :8080] → Internet
 ```
 
-## Архитектура
+## Architecture
 
-- **socks5-client** — слушает SOCKS5 на `127.0.0.1:9999`, мультиплексирует все соединения в **одно** WebSocket-соединение и отправляет на удалённый сервер через HTTPS.
-- **ws-proxy-server** — принимает WebSocket-соединения, извлекает целевые адреса, устанавливает TCP-соединения и пересылает данные.
-- **Nginx** — терминирует TLS, проксирует WebSocket на бэкенд.
+- **socks5-client** — listens for SOCKS5 on `127.0.0.1:9999`, multiplexes all connections into a **single** WebSocket connection, and forwards them to the remote server via HTTPS.
+- **ws-proxy-server** — accepts WebSocket connections, extracts target addresses, establishes TCP connections, and relays data.
+- **Nginx** — terminates TLS, proxies WebSocket to the backend.
 
-### Мультиплексирование
+### Multiplexing
 
-Все SOCKS5-соединения мультиплексируются через одно WebSocket-соединение. Каждый WebSocket binary frame содержит:
+All SOCKS5 connections are multiplexed over a single WebSocket connection. Each WebSocket binary frame contains:
 
 ```
-[4 байта: session_id, big-endian]
-[1 байт:  тип сообщения]
-  0x01 = OPEN   (client→server: payload = целевой адрес + порт)
-  0x02 = STATUS (server→client: payload = 1 байт статус)
-  0x03 = DATA   (bidirectional: payload = raw данные)
-  0x04 = CLOSE  (bidirectional: нет payload)
+[4 bytes: session_id, big-endian]
+[1 byte:  message type]
+  0x01 = OPEN   (client→server: payload = target address + port)
+  0x02 = STATUS (server→client: payload = 1 byte status)
+  0x03 = DATA   (bidirectional: payload = raw data)
+  0x04 = CLOSE  (bidirectional: no payload)
 ```
 
-## Сборка
+## Build
 
-Требуется Go 1.21+.
+Requires Go 1.21+.
 
 ```bash
 make build-all
 ```
 
-Бинарники:
-- `bin/socks5-client` — локальный клиент (macOS / Linux)
-- `bin/ws-proxy-server` — удалённый сервер (Linux)
-- `bin/loadtest` — нагрузочный тест
+Binaries:
+- `bin/socks5-client` — local client (macOS / Linux)
+- `bin/ws-proxy-server` — remote server (Linux)
+- `bin/loadtest` — load testing tool
 
-Отдельные цели:
+Individual targets:
 
 ```bash
-make build-client    # только клиент
-make build-server    # только сервер
-make clean           # удалить bin/
+make build-client    # client only
+make build-server    # server only
+make clean           # remove bin/
 ```
 
-## Запуск
+## Usage
 
-### Удалённый сервер (на Linux-сервере)
+### Remote server (on your Linux server)
 
 ```bash
 ./ws-proxy-server --port 8080 --path /ws-proxy
 ```
 
-| Параметр | Default | Описание |
+| Flag | Default | Description |
 |---|---|---|
-| `--port` | 8080 | Порт для WebSocket (bind 127.0.0.1) |
-| `--path` | /ws-proxy | URI endpoint |
-| `--max-connections` | 100 | Максимум одновременных сессий |
-| `--allowed-ports` | (все) | Разрешённые порты, через запятую: `80,443` |
+| `--port` | 8080 | WebSocket listen port (binds 127.0.0.1) |
+| `--path` | /ws-proxy | WebSocket endpoint URI |
+| `--max-connections` | 100 | Max concurrent sessions |
+| `--allowed-ports` | (all) | Allowed ports, comma-separated: `80,443` |
 
-Env-переменные: `WS_LISTEN_PORT`, `WS_PATH`, `MAX_CONNECTIONS`, `ALLOWED_PORTS`
+Environment variables: `WS_LISTEN_PORT`, `WS_PATH`, `MAX_CONNECTIONS`, `ALLOWED_PORTS`
 
-### Локальный клиент (на вашей машине)
+### Local client (on your machine)
 
 ```bash
 ./socks5-client --port 9999 --server wss://example.com/ws-proxy
 ```
 
-| Параметр | Default | Описание |
+| Flag | Default | Description |
 |---|---|---|
-| `--port` | 9999 | Порт SOCKS5 (bind 127.0.0.1) |
-| `--server` | (обязательный) | Полный URL WebSocket-сервера |
-| `--insecure` | false | Пропустить проверку TLS-сертификата |
+| `--port` | 9999 | SOCKS5 listen port (binds 127.0.0.1) |
+| `--server` | (required) | Full WebSocket server URL |
+| `--insecure` | false | Skip TLS certificate verification |
 
-Env-переменные: `SOCKS5_PORT`, `WS_SERVER_URL`, `WS_INSECURE`
+Environment variables: `SOCKS5_PORT`, `WS_SERVER_URL`, `WS_INSECURE`
 
-### Проверка
+### Verify
 
 ```bash
 curl --socks5-hostname 127.0.0.1:9999 https://ifconfig.me
 ```
 
-Должен вернуться IP удалённого сервера.
+Should return the remote server's IP address.
 
 ## Nginx
 
-Конфигурация для production (Let's Encrypt):
+Production configuration (Let's Encrypt):
 
 ```nginx
 server {
@@ -110,48 +110,48 @@ server {
 }
 ```
 
-## Нагрузочный тест
+## Load Testing
 
 ```bash
 make build-loadtest
 ./bin/loadtest
 ```
 
-Параметры через env-переменные:
+Configuration via environment variables:
 
-| Env | Default | Описание |
+| Env | Default | Description |
 |---|---|---|
-| `N` | 100 | Количество запросов |
-| `C` | 20 | Конкурентность |
-| `PROXY` | 127.0.0.1:9999 | Адрес SOCKS5 прокси |
+| `N` | 100 | Number of requests |
+| `C` | 20 | Concurrency |
+| `PROXY` | 127.0.0.1:9999 | SOCKS5 proxy address |
 | `URL` | postman-echo.com/get | Target URL |
 
 ```bash
 N=500 C=50 ./bin/loadtest
 ```
 
-## Локальное тестирование
+## Local Testing
 
 ```bash
-make certs           # сгенерировать self-signed сертификаты
-make test-nginx      # запустить nginx на порту 40443
-make stop-nginx      # остановить
+make certs           # generate self-signed certificates
+make test-nginx      # start nginx on port 40443
+make stop-nginx      # stop nginx
 
-# Запустить компоненты
+# Start components
 ./bin/ws-proxy-server --port 8080 --path /ws-proxy &
 ./bin/socks5-client --port 9999 --server wss://localhost:40443/ws-proxy --insecure &
 
-# Тест
+# Test
 curl --socks5-hostname 127.0.0.1:9999 https://httpbin.org/ip
 ```
 
-## Зависимости
+## Dependencies
 
 - Go 1.21+
 - [nhooyr.io/websocket](https://pkg.go.dev/nhooyr.io/websocket) — WebSocket
-- [golang.org/x/net](https://pkg.go.dev/golang.org/x/net) — SOCKS5 dialer (только для loadtest)
-- nginx (для TLS termination)
+- [golang.org/x/net](https://pkg.go.dev/golang.org/x/net) — SOCKS5 dialer (loadtest only)
+- nginx (for TLS termination)
 
-## Лицензия
+## License
 
 MIT

@@ -1,0 +1,52 @@
+version: 2
+
+project_name: socks5-ws-proxy
+
+builds:
+  - id: socks5-client
+    main: ./cmd/client
+    binary: socks5-client
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+
+  - id: ws-proxy-server
+    main: ./cmd/server
+    binary: ws-proxy-server
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+
+archives:
+  - id: client
+    name_template: "socks5-client_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    ids:
+      - socks5-client
+
+  - id: server
+    name_template: "ws-proxy-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    ids:
+      - ws-proxy-server
+
+release:
+  github:
+    owner: hoota
+    name: magic-proxy
+  prerelease: auto

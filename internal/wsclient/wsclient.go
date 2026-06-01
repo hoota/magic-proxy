@@ -157,10 +157,17 @@ func (c *Client) writeFrame(f protocol.Frame) error {
 	select {
 	case c.writeCh <- f:
 		return nil
-	case <-time.After(10 * time.Second):
-		return fmt.Errorf("write buffer full")
 	case <-c.ctx.Done():
 		return fmt.Errorf("client shutting down")
+	default:
+		select {
+		case c.writeCh <- f:
+			return nil
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("write buffer full")
+		case <-c.ctx.Done():
+			return fmt.Errorf("client shutting down")
+		}
 	}
 }
 

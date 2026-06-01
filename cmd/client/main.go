@@ -93,7 +93,7 @@ func main() {
 }
 
 func handleConn(browserConn net.Conn, client *wsclient.Client) {
-	addrType, addr, port, err := socks5.Handshake(browserConn)
+	addrType, addr, port, replySent, err := socks5.Handshake(browserConn)
 	if err != nil {
 		logger.Error.Printf("socks handshake failed: %v", err)
 		browserConn.Close()
@@ -105,11 +105,15 @@ func handleConn(browserConn net.Conn, client *wsclient.Client) {
 	sid, err := client.OpenSession(browserConn, addrType, addr, port)
 	if err != nil {
 		logger.Error.Printf("open session failed for %s:%d: %v", addr, port, err)
-		socks5.SendReply(browserConn, socks5.RepGeneralFailure)
+		if !replySent {
+			socks5.SendReply(browserConn, socks5.RepGeneralFailure)
+		}
 		return
 	}
 
-	socks5.SendReply(browserConn, socks5.RepSuccess)
+	if !replySent {
+		socks5.SendReply(browserConn, socks5.RepSuccess)
+	}
 
 	client.StartRelay(sid, browserConn)
 }

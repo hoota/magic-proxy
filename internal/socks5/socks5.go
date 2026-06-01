@@ -28,22 +28,24 @@ const (
 	RepAddrNotSupported = 0x08
 )
 
-func Handshake(conn net.Conn) (addrType byte, addr string, port uint16, err error) {
+func Handshake(conn net.Conn) (addrType byte, addr string, port uint16, replySent bool, err error) {
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer conn.SetDeadline(time.Time{})
 
 	peek := make([]byte, 1)
 	if _, err := io.ReadFull(conn, peek); err != nil {
-		return 0, "", 0, fmt.Errorf("read version: %w", err)
+		return 0, "", 0, false, fmt.Errorf("read version: %w", err)
 	}
 
 	switch peek[0] {
 	case 0x04:
-		return handshakeSOCKS4a(conn)
+		addrType, addr, port, err = handshakeSOCKS4a(conn)
+		return addrType, addr, port, true, err
 	case socks5Version:
-		return handshakeSOCKS5(conn)
+		addrType, addr, port, err = handshakeSOCKS5(conn)
+		return addrType, addr, port, false, err
 	default:
-		return 0, "", 0, fmt.Errorf("unexpected SOCKS version: 0x%02x", peek[0])
+		return 0, "", 0, false, fmt.Errorf("unexpected SOCKS version: 0x%02x", peek[0])
 	}
 }
 
@@ -83,11 +85,11 @@ func handshakeSOCKS4a(conn net.Conn) (addrType byte, addr string, port uint16, e
 		return 0, "", 0, fmt.Errorf("read socks4 request: %w", err)
 	}
 
-	port = binary.BigEndian.Uint16(rest[0:2])
-
-	if rest[2] != 0x01 {
-		return 0, "", 0, fmt.Errorf("socks4: unsupported command: 0x%02x", rest[2])
+	if rest[0] != 0x01 {
+		return 0, "", 0, fmt.Errorf("socks4: unsupported command: 0x%02x", rest[0])
 	}
+
+	port = binary.BigEndian.Uint16(rest[1:3])
 
 	ip := rest[3:7]
 

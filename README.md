@@ -3,7 +3,7 @@
 A SOCKS5 proxy tunneled over WebSocket through HTTPS. Masks TCP traffic as regular HTTPS WebSocket traffic.
 
 ```
-[Browser] → SOCKS5 → [socks5-client :9999] → WSS → [Nginx :443] → [ws-proxy-server :8080] → Internet
+[Browser] → SOCKS5 → [socks5-client :9999] → WSS → [Nginx :443] → [ws-proxy-server :44088] → Internet
 ```
 
 ## Architecture
@@ -34,7 +34,7 @@ make build-all
 ```
 
 Binaries:
-- `bin/socks5-client` — local client (macOS / Linux)
+- `bin/socks5-client` — local client (macOS / Linux / Windows)
 - `bin/ws-proxy-server` — remote server (Linux)
 - `bin/loadtest` — load testing tool
 
@@ -51,17 +51,18 @@ make clean           # remove bin/
 ### Remote server (on your Linux server)
 
 ```bash
-./ws-proxy-server --port 8080 --path /ws-proxy
+./ws-proxy-server --port 44088 --path /ws-proxy
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--port` | 8080 | WebSocket listen port (binds 127.0.0.1) |
+| `--port` | 44088 | WebSocket listen port (binds 127.0.0.1) |
 | `--path` | /ws-proxy | WebSocket endpoint URI |
 | `--max-connections` | 100 | Max concurrent sessions |
 | `--allowed-ports` | (all) | Allowed ports, comma-separated: `80,443` |
+| `--log-level` | error | Log level: `error`, `info` |
 
-Environment variables: `WS_LISTEN_PORT`, `WS_PATH`, `MAX_CONNECTIONS`, `ALLOWED_PORTS`
+Environment variables: `WS_LISTEN_PORT`, `WS_PATH`, `MAX_CONNECTIONS`, `ALLOWED_PORTS`, `LOG_LEVEL`
 
 ### Local client (on your machine)
 
@@ -74,8 +75,14 @@ Environment variables: `WS_LISTEN_PORT`, `WS_PATH`, `MAX_CONNECTIONS`, `ALLOWED_
 | `--port` | 9999 | SOCKS5 listen port (binds 127.0.0.1) |
 | `--server` | (required) | Full WebSocket server URL |
 | `--insecure` | false | Skip TLS certificate verification |
+| `--log-level` | error | Log level: `error`, `info` |
 
-Environment variables: `SOCKS5_PORT`, `WS_SERVER_URL`, `WS_INSECURE`
+Environment variables: `SOCKS5_PORT`, `WS_SERVER_URL`, `WS_INSECURE`, `LOG_LEVEL`
+
+### Log levels
+
+- `error` (default) — only errors: connection failures, protocol errors
+- `info` — errors + session lifecycle: new connections, target hosts, active session count
 
 ### Verify
 
@@ -98,7 +105,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
 
     location /ws-proxy {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:44088;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -110,12 +117,15 @@ server {
 }
 ```
 
-## Load Testing
+## Testing
+
+End-to-end test (builds everything, starts server + nginx + 3 proxy clients, runs loadtest, cleans up):
 
 ```bash
-make build-loadtest
-./bin/loadtest
+./test-e2e.sh
 ```
+
+Loadtest hits 3 SOCKS5 proxy instances (ports 9999, 9998, 9997) with random distribution.
 
 Configuration via environment variables:
 
@@ -123,26 +133,10 @@ Configuration via environment variables:
 |---|---|---|
 | `N` | 100 | Number of requests |
 | `C` | 20 | Concurrency |
-| `PROXY` | 127.0.0.1:9999 | SOCKS5 proxy address |
 | `URL` | postman-echo.com/get | Target URL |
 
 ```bash
 N=500 C=50 ./bin/loadtest
-```
-
-## Local Testing
-
-```bash
-make certs           # generate self-signed certificates
-make test-nginx      # start nginx on port 40443
-make stop-nginx      # stop nginx
-
-# Start components
-./bin/ws-proxy-server --port 8080 --path /ws-proxy &
-./bin/socks5-client --port 9999 --server wss://localhost:40443/ws-proxy --insecure &
-
-# Test
-curl --socks5-hostname 127.0.0.1:9999 https://httpbin.org/ip
 ```
 
 ## Dependencies

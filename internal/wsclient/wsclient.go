@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"nhooyr.io/websocket"
+	"socks5-ws-proxy/internal/logger"
 	"socks5-ws-proxy/internal/protocol"
 )
 
@@ -66,7 +66,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	go c.readPump()
 
-	log.Printf("connected to %s", c.wsURL)
+	logger.Info.Printf("connected to %s", c.wsURL)
 	return nil
 }
 
@@ -155,7 +155,7 @@ func (c *Client) readPump() {
 		msgType, data, err := c.ws.Read(c.ctx)
 		if err != nil {
 			if !isClosedErr(err) {
-				log.Printf("ws read error: %v", err)
+				logger.Error.Printf("ws read error: %v", err)
 			}
 			return
 		}
@@ -165,7 +165,7 @@ func (c *Client) readPump() {
 
 		frame, err := protocol.UnmarshalFrame(data)
 		if err != nil {
-			log.Printf("unmarshal frame: %v", err)
+			logger.Error.Printf("unmarshal frame: %v", err)
 			continue
 		}
 

@@ -18,10 +18,15 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+var proxyAddrs = []string{
+	"127.0.0.1:9999",
+	"127.0.0.1:9998",
+	"127.0.0.1:9997",
+}
+
 func main() {
 	total := 100
 	concurrency := 20
-	proxyAddr := "127.0.0.1:9999"
 	targetURL := "https://postman-echo.com/get"
 
 	if v := os.Getenv("N"); v != "" {
@@ -34,34 +39,38 @@ func main() {
 			concurrency = n
 		}
 	}
-	if v := os.Getenv("PROXY"); v != "" {
-		proxyAddr = v
-	}
 	if v := os.Getenv("URL"); v != "" {
 		targetURL = v
 	}
 
-	dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, &net.Dialer{
-		Timeout: 10 * time.Second,
-	})
-	if err != nil {
-		log.Fatalf("socks5 dialer: %v", err)
-	}
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			Dial: func(network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
+	clients := make([]*http.Client, len(proxyAddrs))
+	for i, addr := range proxyAddrs {
+		dialer, err := proxy.SOCKS5("tcp", addr, nil, &net.Dialer{
+			Timeout: 10 * time.Second,
+		})
+		if err != nil {
+			log.Fatalf("socks5 dialer %s: %v", addr, err)
+		}
+		clients[i] = &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				Dial: func(network, addr string) (net.Conn, error) {
+					return dialer.Dial(network, addr)
+				},
+				TLSClientConfig:     &tls.Config{},
+				TLSHandshakeTimeout: 10 * time.Second,
 			},
-			TLSClientConfig:     &tls.Config{},
-			TLSHandshakeTimeout: 10 * time.Second,
-		},
+		}
 	}
 
-	log.Printf("load test: %d requests, %d concurrent, proxy=%s", total, concurrency, proxyAddr)
+	log.Printf("load test: %d requests, %d concurrent, %d proxies", total, concurrency, len(clients))
 
 	var ok, fail atomic.Int64
+	var perProxy []atomic.Int64
+	for range proxyAddrs {
+		perProxy = append(perProxy, atomic.Int64{})
+	}
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, concurrency)
 	start := time.Now()
@@ -74,12 +83,13 @@ func main() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			ci := rand.Intn(len(clients))
 			uuid := randomUUID()
 			url := fmt.Sprintf("%s?x=%s", targetURL, uuid)
 
-			resp, err := client.Get(url)
+			resp, err := clients[ci].Get(url)
 			if err != nil {
-				log.Printf("[%d] ERROR: %v", idx, err)
+				log.Printf("[%d] ERROR (proxy %s): %v", idx, proxyAddrs[ci], err)
 				fail.Add(1)
 				return
 			}
@@ -105,6 +115,7 @@ func main() {
 			}
 
 			ok.Add(1)
+			perProxy[ci].Add(1)
 			if (idx+1)%10 == 0 {
 				elapsed := time.Since(start)
 				log.Printf("[%d/%d] ok=%d fail=%d (%.1f req/s)", idx+1, total, ok.Load(), fail.Load(), float64(ok.Load()+fail.Load())/elapsed.Seconds())
@@ -117,6 +128,10 @@ func main() {
 
 	log.Printf("result: %d ok, %d fail, %v elapsed (%.1f req/s)",
 		ok.Load(), fail.Load(), elapsed.Round(time.Millisecond), float64(total)/elapsed.Seconds())
+
+	for i, addr := range proxyAddrs {
+		log.Printf("  %s: %d requests", addr, perProxy[i].Load())
+	}
 
 	if fail.Load() > 0 {
 		os.Exit(1)

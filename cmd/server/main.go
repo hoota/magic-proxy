@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,14 +11,16 @@ import (
 	"syscall"
 	"time"
 
+	"socks5-ws-proxy/internal/logger"
 	"socks5-ws-proxy/internal/wsserver"
 )
 
 func main() {
-	listenPort := flag.Int("port", 8080, "port to listen for WebSocket connections from nginx (binds 127.0.0.1)")
+	listenPort := flag.Int("port", 44088, "port to listen for WebSocket connections from nginx (binds 127.0.0.1)")
 	wsPath := flag.String("path", "/ws-proxy", "WebSocket endpoint URI")
 	allowedPorts := flag.String("allowed-ports", "", "comma-separated list of allowed ports (empty = all)")
 	maxConns := flag.Int("max-connections", 100, "max concurrent sessions")
+	logLevel := flag.String("log-level", "error", "log level: error, info")
 
 	flag.Parse()
 
@@ -39,6 +40,11 @@ func main() {
 			*maxConns = n
 		}
 	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		*logLevel = v
+	}
+
+	logger.Init(*logLevel)
 
 	var ports []int
 	if *allowedPorts != "" {
@@ -66,7 +72,7 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("shutting down...")
+		logger.Info.Println("shutting down...")
 		cancel()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
@@ -74,6 +80,6 @@ func main() {
 	}()
 
 	if err := srv.Start(ctx); err != nil {
-		log.Fatalf("server error: %v", err)
+		logger.Error.Fatalf("server error: %v", err)
 	}
 }

@@ -3,7 +3,6 @@ package wsserver
 import (
 	"context"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"nhooyr.io/websocket"
+	"socks5-ws-proxy/internal/logger"
 	"socks5-ws-proxy/internal/protocol"
 )
 
@@ -63,7 +63,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("ws-proxy-server listening on %s, path %s", s.listenAddr, s.wsPath)
+		logger.Info.Printf("ws-proxy-server listening on %s, path %s", s.listenAddr, s.wsPath)
 		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 			errCh <- err
 		}
@@ -93,7 +93,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
-		log.Printf("ws accept error: %v", err)
+		logger.Error.Printf("ws accept error: %v", err)
 		return
 	}
 	defer ws.Close(websocket.StatusInternalError, "closing")
@@ -117,8 +117,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if ts != nil {
 			ts.conn.Close()
 		}
-		sessions.Delete(sid)
-		s.activeConns.Add(-1)
+		if _, loaded := sessions.LoadAndDelete(sid); loaded {
+			s.activeConns.Add(-1)
+		}
 		writeFrame(protocol.Frame{SessionID: sid, Type: protocol.MsgClose})
 	}
 
@@ -126,7 +127,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		msgType, data, err := ws.Read(ctx)
 		if err != nil {
 			if !isClosedErr(err) {
-				log.Printf("ws read error: %v", err)
+				logger.Error.Printf("ws read error: %v", err)
 			}
 			break
 		}
@@ -136,7 +137,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		frame, err := protocol.UnmarshalFrame(data)
 		if err != nil {
-			log.Printf("unmarshal frame: %v", err)
+			logger.Error.Printf("unmarshal frame: %v", err)
 			continue
 		}
 
@@ -153,13 +154,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			ts.conn.Write(frame.Payload)
 
 		case protocol.MsgClose:
-			val, ok := sessions.Load(frame.SessionID)
+			val, ok := sessions.LoadAndDelete(frame.SessionID)
 			if !ok {
 				continue
 			}
 			ts := val.(*targetSession)
 			ts.conn.Close()
-			sessions.Delete(frame.SessionID)
 			s.activeConns.Add(-1)
 		}
 	}
@@ -176,22 +176,22 @@ func (s *Server) handleOpen(ctx context.Context, sessions *sync.Map, frame proto
 
 	addrType, addr, port, err := protocol.DecodeTarget(frame.Payload)
 	if err != nil {
-		log.Printf("decode target (session %d): %v", sid, err)
+		logger.Error.Printf("decode target (session %d): %v", sid, err)
 		writeFrame(protocol.Frame{SessionID: sid, Type: protocol.MsgStatus, Payload: []byte{0x01}})
 		return
 	}
 
 	if len(s.allowedPorts) > 0 && !s.allowedPorts[int(port)] {
-		log.Printf("port %d not allowed (session %d)", port, sid)
+		logger.Error.Printf("port %d not allowed (session %d)", port, sid)
 		writeFrame(protocol.Frame{SessionID: sid, Type: protocol.MsgStatus, Payload: []byte{0x02}})
 		return
 	}
 
-	log.Printf("session %d: connecting to %s:%d (type=0x%02x)", sid, addr, port, addrType)
+	logger.Info.Printf("session %d: connecting to %s:%d (type=0x%02x)", sid, addr, port, addrType)
 
 	tcpConn, err := net.DialTimeout("tcp", net.JoinHostPort(addr, strconv.Itoa(int(port))), 30*time.Second)
 	if err != nil {
-		log.Printf("session %d: tcp connect to %s:%d failed: %v", sid, addr, port, err)
+		logger.Error.Printf("session %d: tcp connect to %s:%d failed: %v", sid, addr, port, err)
 		status := mapTCPErrno(err)
 		writeFrame(protocol.Frame{SessionID: sid, Type: protocol.MsgStatus, Payload: []byte{status}})
 		return
@@ -199,7 +199,7 @@ func (s *Server) handleOpen(ctx context.Context, sessions *sync.Map, frame proto
 
 	s.activeConns.Add(1)
 	sessions.Store(sid, &targetSession{conn: tcpConn})
-	log.Printf("session %d: connected to %s:%d, active: %d", sid, addr, port, s.activeConns.Load())
+	logger.Info.Printf("session %d: connected to %s:%d, active: %d", sid, addr, port, s.activeConns.Load())
 
 	writeFrame(protocol.Frame{SessionID: sid, Type: protocol.MsgStatus, Payload: []byte{0x00}})
 

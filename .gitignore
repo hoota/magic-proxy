@@ -1,5 +1,4 @@
-bin/
-logs/
-certs/
-*.pem
-loadtest
+/bin/
+/logs/
+/certs/
+/.idea/

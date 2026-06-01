@@ -1,6 +1,6 @@
 module socks5-ws-proxy
 
-go 1.26.3
+go 1.25.0
 
 require nhooyr.io/websocket v1.8.17
 

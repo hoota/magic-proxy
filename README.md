@@ -27,7 +27,7 @@ All SOCKS5 connections are multiplexed over a single WebSocket connection. Each 
 
 ## Build
 
-Requires Go 1.21+.
+Requires Go 1.24+.
 
 ```bash
 make build-all
@@ -141,7 +141,7 @@ N=500 C=50 ./bin/loadtest
 
 ## Dependencies
 
-- Go 1.21+
+- Go 1.24+
 - [nhooyr.io/websocket](https://pkg.go.dev/nhooyr.io/websocket) — WebSocket
 - [golang.org/x/net](https://pkg.go.dev/golang.org/x/net) — SOCKS5 dialer (loadtest only)
 - nginx (for TLS termination)

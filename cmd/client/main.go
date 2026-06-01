@@ -95,8 +95,8 @@ func main() {
 func handleConn(browserConn net.Conn, client *wsclient.Client) {
 	addrType, addr, port, err := socks5.Handshake(browserConn)
 	if err != nil {
-		logger.Error.Printf("socks5 handshake failed: %v", err)
-		socks5.SendReply(browserConn, socks5.RepGeneralFailure)
+		logger.Error.Printf("socks handshake failed: %v", err)
+		browserConn.Close()
 		return
 	}
 

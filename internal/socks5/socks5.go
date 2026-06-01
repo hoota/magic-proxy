@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"socks5-ws-proxy/internal/protocol"
@@ -31,6 +32,35 @@ func Handshake(conn net.Conn) (addrType byte, addr string, port uint16, err erro
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer conn.SetDeadline(time.Time{})
 
+	peek := make([]byte, 1)
+	if _, err := io.ReadFull(conn, peek); err != nil {
+		return 0, "", 0, fmt.Errorf("read version: %w", err)
+	}
+
+	switch peek[0] {
+	case 0x04:
+		return handshakeSOCKS4a(conn)
+	case socks5Version:
+		return handshakeSOCKS5(conn)
+	default:
+		return 0, "", 0, fmt.Errorf("unexpected SOCKS version: 0x%02x", peek[0])
+	}
+}
+
+func SendReply(conn net.Conn, rep byte) error {
+	reply := []byte{
+		socks5Version,
+		rep,
+		0x00,
+		0x01,
+		0, 0, 0, 0,
+		0, 0,
+	}
+	_, err := conn.Write(reply)
+	return err
+}
+
+func handshakeSOCKS5(conn net.Conn) (addrType byte, addr string, port uint16, err error) {
 	if err := readGreeting(conn); err != nil {
 		return 0, "", 0, fmt.Errorf("greeting: %w", err)
 	}
@@ -47,30 +77,70 @@ func Handshake(conn net.Conn) (addrType byte, addr string, port uint16, err erro
 	return addrType, addr, port, nil
 }
 
-func SendReply(conn net.Conn, rep byte) error {
-	reply := []byte{
-		socks5Version,
-		rep,
-		0x00,
-		0x01,
-		0, 0, 0, 0,
-		0, 0,
+func handshakeSOCKS4a(conn net.Conn) (addrType byte, addr string, port uint16, err error) {
+	rest := make([]byte, 7)
+	if _, err := io.ReadFull(conn, rest); err != nil {
+		return 0, "", 0, fmt.Errorf("read socks4 request: %w", err)
 	}
-	_, err := conn.Write(reply)
-	return err
+
+	port = binary.BigEndian.Uint16(rest[0:2])
+
+	if rest[2] != 0x01 {
+		return 0, "", 0, fmt.Errorf("socks4: unsupported command: 0x%02x", rest[2])
+	}
+
+	ip := rest[3:7]
+
+	userID := make([]byte, 256)
+	var userIDLen int
+	for {
+		b := make([]byte, 1)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return 0, "", 0, fmt.Errorf("read socks4 userid: %w", err)
+		}
+		if b[0] == 0x00 {
+			break
+		}
+		if userIDLen < len(userID) {
+			userID[userIDLen] = b[0]
+			userIDLen++
+		}
+	}
+
+	if ip[0] == 0x00 && ip[1] == 0x00 && ip[2] == 0x00 && ip[3] != 0x00 {
+		var domain strings.Builder
+		for {
+			b := make([]byte, 1)
+			if _, err := io.ReadFull(conn, b); err != nil {
+				return 0, "", 0, fmt.Errorf("read socks4a domain: %w", err)
+			}
+			if b[0] == 0x00 {
+				break
+			}
+			domain.WriteByte(b[0])
+		}
+		addr = domain.String()
+		addrType = protocol.AddrDomain
+	} else {
+		addr = net.IP(ip).String()
+		addrType = protocol.AddrIPv4
+	}
+
+	reply := []byte{0x00, 0x5a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if _, err := conn.Write(reply); err != nil {
+		return 0, "", 0, fmt.Errorf("socks4 reply: %w", err)
+	}
+
+	return addrType, addr, port, nil
 }
 
 func readGreeting(conn net.Conn) error {
-	header := make([]byte, 2)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return fmt.Errorf("read greeting header: %w", err)
+	numMethodsBuf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, numMethodsBuf); err != nil {
+		return fmt.Errorf("read num methods: %w", err)
 	}
 
-	if header[0] != socks5Version {
-		return fmt.Errorf("unexpected SOCKS version: 0x%02x", header[0])
-	}
-
-	numMethods := int(header[1])
+	numMethods := int(numMethodsBuf[0])
 	if numMethods == 0 {
 		return errors.New("no auth methods offered")
 	}

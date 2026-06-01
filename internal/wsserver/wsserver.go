@@ -16,6 +16,8 @@ import (
 	"socks5-ws-proxy/internal/protocol"
 )
 
+const writeBufSize = 256
+
 type targetSession struct {
 	conn net.Conn
 }
@@ -101,16 +103,37 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(1 << 20)
 
 	sessions := sync.Map{}
-	writeMu := sync.Mutex{}
+	writeCh := make(chan protocol.Frame, writeBufSize)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	writeFrame := func(f protocol.Frame) error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		wCtx, wCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer wCancel()
-		return ws.Write(wCtx, websocket.MessageBinary, f.Marshal())
+	go func() {
+		for {
+			select {
+			case f, ok := <-writeCh:
+				if !ok {
+					return
+				}
+				wCtx, wCancel := context.WithTimeout(ctx, 10*time.Second)
+				err := ws.Write(wCtx, websocket.MessageBinary, f.Marshal())
+				wCancel()
+				if err != nil {
+					cancel()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	writeFrame := func(f protocol.Frame) {
+		select {
+		case writeCh <- f:
+		case <-time.After(10 * time.Second):
+			logger.Error.Printf("write buffer full, dropping frame sid=%d type=0x%02x", f.SessionID, f.Type)
+		case <-ctx.Done():
+		}
 	}
 
 	closeSession := func(sid uint32, ts *targetSession) {
@@ -164,6 +187,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	close(writeCh)
+
 	sessions.Range(func(key, value interface{}) bool {
 		ts := value.(*targetSession)
 		ts.conn.Close()
@@ -171,7 +196,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleOpen(ctx context.Context, sessions *sync.Map, frame protocol.Frame, writeFrame func(protocol.Frame) error, closeSession func(uint32, *targetSession)) {
+func (s *Server) handleOpen(ctx context.Context, sessions *sync.Map, frame protocol.Frame, writeFrame func(protocol.Frame), closeSession func(uint32, *targetSession)) {
 	sid := frame.SessionID
 
 	addrType, addr, port, err := protocol.DecodeTarget(frame.Payload)
@@ -208,14 +233,13 @@ func (s *Server) handleOpen(ctx context.Context, sessions *sync.Map, frame proto
 		for {
 			n, readErr := tcpConn.Read(buf)
 			if n > 0 {
-				wErr := writeFrame(protocol.Frame{
+				payload := make([]byte, n)
+				copy(payload, buf[:n])
+				writeFrame(protocol.Frame{
 					SessionID: sid,
 					Type:      protocol.MsgData,
-					Payload:   buf[:n],
+					Payload:   payload,
 				})
-				if wErr != nil {
-					break
-				}
 			}
 			if readErr != nil {
 				break

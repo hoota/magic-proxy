@@ -17,6 +17,8 @@ import (
 	"socks5-ws-proxy/internal/protocol"
 )
 
+const writeBufSize = 256
+
 type session struct {
 	conn     net.Conn
 	statusCh chan byte
@@ -30,18 +32,25 @@ type Client struct {
 	nextID   atomic.Uint32
 	ctx      context.Context
 	cancel   context.CancelFunc
-	writeMu  sync.Mutex
+	writeCh  chan protocol.Frame
+	ready    chan struct{}
 }
 
 func New(wsURL string, insecure bool) *Client {
 	return &Client{
 		wsURL:    wsURL,
 		insecure: insecure,
+		ready:    make(chan struct{}),
 	}
 }
 
 func (c *Client) Connect(ctx context.Context) error {
-	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	c.ctx, c.cancel = context.WithCancel(ctx)
+	return c.dial()
+}
+
+func (c *Client) dial() error {
+	dialCtx, cancel := context.WithTimeout(c.ctx, 15*time.Second)
 	defer cancel()
 
 	opts := &websocket.DialOptions{
@@ -62,8 +71,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	ws.SetReadLimit(1 << 20)
 
 	c.ws = ws
-	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.writeCh = make(chan protocol.Frame, writeBufSize)
+	close(c.ready)
 
+	go c.writerPump()
 	go c.readPump()
 
 	logger.Info.Printf("connected to %s", c.wsURL)
@@ -84,6 +95,10 @@ func (c *Client) Close() {
 	})
 }
 
+func (c *Client) WaitReady() {
+	<-c.ready
+}
+
 func (c *Client) OpenSession(browserConn net.Conn, addrType byte, addr string, port uint16) (uint32, error) {
 	sid := c.nextID.Add(1)
 	sess := &session{
@@ -98,13 +113,11 @@ func (c *Client) OpenSession(browserConn net.Conn, addrType byte, addr string, p
 		return 0, fmt.Errorf("encode target: %w", err)
 	}
 
-	frame := protocol.Frame{
+	if err := c.writeFrame(protocol.Frame{
 		SessionID: sid,
 		Type:      protocol.MsgOpen,
 		Payload:   target,
-	}
-
-	if err := c.writeFrame(frame); err != nil {
+	}); err != nil {
 		c.sessions.Delete(sid)
 		return 0, fmt.Errorf("write open: %w", err)
 	}
@@ -141,22 +154,43 @@ func (c *Client) StartRelay(sid uint32, browserConn net.Conn) {
 }
 
 func (c *Client) writeFrame(f protocol.Frame) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
-	defer cancel()
-	return c.ws.Write(ctx, websocket.MessageBinary, f.Marshal())
+	select {
+	case c.writeCh <- f:
+		return nil
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("write buffer full")
+	case <-c.ctx.Done():
+		return fmt.Errorf("client shutting down")
+	}
+}
+
+func (c *Client) writerPump() {
+	for {
+		select {
+		case f, ok := <-c.writeCh:
+			if !ok {
+				return
+			}
+			ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+			err := c.ws.Write(ctx, websocket.MessageBinary, f.Marshal())
+			cancel()
+			if err != nil {
+				return
+			}
+		case <-c.ctx.Done():
+			return
+		}
+	}
 }
 
 func (c *Client) readPump() {
-	defer c.cancel()
-
 	for {
 		msgType, data, err := c.ws.Read(c.ctx)
 		if err != nil {
 			if !isClosedErr(err) {
 				logger.Error.Printf("ws read error: %v", err)
 			}
+			c.reconnect()
 			return
 		}
 		if msgType != websocket.MessageBinary {
@@ -194,17 +228,57 @@ func (c *Client) readPump() {
 	}
 }
 
+func (c *Client) reconnect() {
+	c.ws.Close(websocket.StatusInternalError, "reconnecting")
+	close(c.writeCh)
+
+	c.sessions.Range(func(key, value interface{}) bool {
+		s := value.(*session)
+		s.conn.Close()
+		c.sessions.Delete(key)
+		return true
+	})
+
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+		}
+
+		logger.Info.Printf("reconnecting to %s (backoff %v)...", c.wsURL, backoff)
+
+		c.ready = make(chan struct{})
+		if err := c.dial(); err != nil {
+			logger.Error.Printf("reconnect failed: %v", err)
+			time.Sleep(backoff)
+			backoff = backoff * 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		logger.Info.Printf("reconnected to %s", c.wsURL)
+		return
+	}
+}
+
 func (c *Client) relayBrowserToWS(sid uint32, sess *session) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := sess.conn.Read(buf)
 		if n > 0 {
-			f := protocol.Frame{
+			payload := make([]byte, n)
+			copy(payload, buf[:n])
+			if werr := c.writeFrame(protocol.Frame{
 				SessionID: sid,
 				Type:      protocol.MsgData,
-				Payload:   buf[:n],
-			}
-			if werr := c.writeFrame(f); werr != nil {
+				Payload:   payload,
+			}); werr != nil {
 				break
 			}
 		}
